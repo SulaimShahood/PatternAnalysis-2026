@@ -1,0 +1,20 @@
+# checkpoints and weights
+*.pt
+*.pth
+*.ckpt
+
+# medical imaging data (never commit datasets)
+*.nii
+*.nii.gz
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# local outputs (figures/ and assets/ are the exception -- those get committed
+# deliberately with small PNGs for the README; everything else in an output
+# dir does not)
+outputs/
+runs/
+*.csv.lock
