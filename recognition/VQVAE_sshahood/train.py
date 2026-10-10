@@ -162,6 +162,7 @@ def main():
 
     if args.smoke:
         args.epochs = min(args.epochs, 2)
+        args.batch_size = min(args.batch_size, 4)
 
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs("figures", exist_ok=True)
@@ -173,7 +174,11 @@ def main():
     val_ds = HipMRISlices(args.data_dir, split="validate", early_stop=args.smoke)
     print(f"Train slices: {len(train_ds)}, validation slices: {len(val_ds)}")
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    # drop_last=False: there is no BatchNorm in modules.py (nothing that
+    # needs a consistent batch size), and dropping the final batch
+    # silently zeroed out training entirely on a small/smoke dataset
+    # whenever it was smaller than one batch.
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
     model = MODELS[args.model](
