@@ -101,7 +101,7 @@ class HipMRISlices(Dataset):
             )
 
         if early_stop:
-            self.files = self.files[:20]
+            self.files = self.files[:128]
 
     def __len__(self):
         return len(self.files)
