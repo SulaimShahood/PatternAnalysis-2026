@@ -40,9 +40,9 @@ class ResidualBlock(nn.Module):
         super().__init__()
         hidden_channels = hidden_channels or channels
         self.block = nn.Sequential(
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Conv2d(channels, hidden_channels, kernel_size=3, padding=1, bias=False),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Conv2d(hidden_channels, channels, kernel_size=1, bias=False),
         )
 
@@ -67,7 +67,7 @@ class Encoder(nn.Module):
         for i in range(num_downsampling_layers):
             out_channels = hidden_channels if i > 0 else hidden_channels // 2
             layers.append(nn.Conv2d(channels, out_channels, kernel_size=4, stride=2, padding=1))
-            layers.append(nn.ReLU(inplace=True))
+            layers.append(nn.ReLU(inplace=False))
             channels = out_channels
         for _ in range(num_residual_layers):
             layers.append(ResidualBlock(channels))
@@ -102,7 +102,7 @@ class Decoder(nn.Module):
             next_channels = out_channels if is_last else max(hidden_channels // 2, out_channels)
             layers.append(nn.ConvTranspose2d(channels, next_channels, kernel_size=4, stride=2, padding=1))
             if not is_last:
-                layers.append(nn.ReLU(inplace=True))
+                layers.append(nn.ReLU(inplace=False))
             channels = next_channels
         layers.append(nn.Sigmoid())
         self.net = nn.Sequential(*layers)
@@ -138,7 +138,7 @@ class VectorQuantizerEMA(nn.Module):
         self.register_buffer("ema_cluster_size", torch.zeros(num_embeddings))
         self.register_buffer("ema_w", embedding.clone())
 
-def forward(self, z_e: torch.Tensor):
+    def forward(self, z_e: torch.Tensor):
         """z_e: (B, D, H, W) continuous encoder output.
 
         Returns:
