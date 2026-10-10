@@ -138,7 +138,7 @@ class VectorQuantizerEMA(nn.Module):
         self.register_buffer("ema_cluster_size", torch.zeros(num_embeddings))
         self.register_buffer("ema_w", embedding.clone())
 
-    def forward(self, z_e: torch.Tensor):
+def forward(self, z_e: torch.Tensor):
         """z_e: (B, D, H, W) continuous encoder output.
 
         Returns:
