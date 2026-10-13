@@ -81,15 +81,27 @@ through the whole data loader and model with no shape or gradient errors.
 ### 4. Risks, Compute Budget and Fallback
 
 The biggest risk is codebook collapse -- the model learning to use only a
-handful of codes. This will be caught early by watching codebook perplexity
-and per-code usage from the first training run. A second risk, already
-partly surfaced above, is patient leakage from filename-parsing mistakes;
-this is addressed by the corrected, explicit patient-level split.
+handful of codes -- and this is no longer a hypothetical risk: the smoke
+test (2 epochs, 128 slices) already reproduced it. Validation perplexity
+was 1.0 on both epochs, meaning every encoder output in the batch was
+mapped to the same single codebook entry out of 512. This is a known
+failure mode at initialisation (one random codebook vector ends up nearest
+to almost everything, "wins" every comparison, and a code that's never
+chosen never receives an EMA update, so it stays dead). The planned fix is
+dead-code revival: any codebook entry whose usage has fallen near zero is
+reset to a real encoder output sampled from the current batch, giving it a
+fresh chance instead of leaving it permanently unused. This will be
+implemented and re-verified on a smoke test before any full training run.
+A second risk, already partly surfaced above, is patient leakage from
+filename-parsing mistakes; this is addressed by the corrected, explicit
+patient-level split, which has been run end-to-end on Rangpur (31 train /
+4 validate / 3 test patients, no overlap).
 
-Training will run on the Rangpur GPU cluster. Peak GPU memory and
-wall-clock training time will be recorded from the first runs to understand
-what's actually affordable. The next planned step is a short smoke test,
-followed by a first real VQ-VAE training run.
+Training runs on the Rangpur GPU cluster (A100 nodes). Peak GPU memory
+and wall-clock training time will be recorded from the first full runs to
+understand what's actually affordable. The immediate next step is the
+dead-code revival fix above, re-verified on a smoke test, followed by the
+first full VQ-VAE and baseline training runs.
 
 If the quantiser proves hard to get working, the fallback is a plain
 convolutional autoencoder -- identical encoder, decoder, data and training
