@@ -213,10 +213,9 @@ pad_or_crop`) so the actual prevalence of this is on the record rather
 than silently patched over.
 
 **Status:** code written and syntax-checked, not yet re-run on Rangpur.
-**Next step (urgent -- deadline is 2026-10-18): push, pull on Rangpur,
-resubmit both jobs, confirm they get past epoch 1 this time, and watch
-`val_perplexity` / `codes_revived` to confirm the dead-code fix is also
-doing its job on the real dataset.**
+**Next step: push, pull on Rangpur, resubmit both jobs, confirm they
+get past epoch 1 this time, and watch `val_perplexity` / `codes_revived`
+to confirm the dead-code fix is also doing its job on the real dataset.**
 
 ---
 
