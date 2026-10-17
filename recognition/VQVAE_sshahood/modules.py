@@ -125,13 +125,21 @@ class VectorQuantizerEMA(nn.Module):
 
     def __init__(self, num_embeddings: int = 512, embedding_dim: int = 64,
                  commitment_cost: float = 0.25, decay: float = 0.99,
-                 epsilon: float = 1e-5):
+                 epsilon: float = 1e-5, dead_code_threshold: float = 1.0):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
         self.commitment_cost = commitment_cost
         self.decay = decay
         self.epsilon = epsilon
+        # A code whose EMA usage count stays below this is considered
+        # "dead" and gets revived (see forward()). 1.0 roughly means "has
+        # essentially never been any encoder vector's nearest neighbour".
+        self.dead_code_threshold = dead_code_threshold
+        # Updated every forward() call in training mode; train.py reads
+        # this to log how many codes were revived each step, as part of
+        # the detailed training log.
+        self.last_num_revived = 0
 
         embedding = torch.randn(num_embeddings, embedding_dim)
         self.register_buffer("embedding", embedding)
@@ -189,6 +197,27 @@ class VectorQuantizerEMA(nn.Module):
             )
             self.embedding.copy_(self.ema_w / smoothed_cluster_size.unsqueeze(1))
 
+            # Dead-code revival. A code that is never any encoder vector's
+            # nearest neighbour never appears in `encodings`, so it never
+            # gets an EMA update either -- it would otherwise stay dead
+            # forever once another code "wins" early (exactly what
+            # happened in the smoke test: perplexity stuck at 1.0).
+            # Instead, any code whose running usage has stayed below
+            # dead_code_threshold is reset to a real encoder output
+            # sampled from this batch, giving it a genuine fresh chance
+            # instead of leaving it permanently unused.
+            dead_codes = self.ema_cluster_size < self.dead_code_threshold
+            num_dead = int(dead_codes.sum().item())
+            if num_dead > 0:
+                random_rows = torch.randint(0, flat.shape[0], (num_dead,), device=flat.device)
+                revived = flat[random_rows].detach()
+                self.embedding[dead_codes] = revived
+                self.ema_w[dead_codes] = revived
+                self.ema_cluster_size[dead_codes] = 1.0
+            self.last_num_revived = num_dead
+        else:
+            self.last_num_revived = 0
+
         # Commitment loss: keeps the encoder's output close to whichever
         # code it keeps being assigned to. No separate codebook loss term
         # is needed -- the EMA update above takes its place.
@@ -230,12 +259,14 @@ class VQVAE(nn.Module):
     def __init__(self, in_channels: int = 1, hidden_channels: int = 128,
                  embedding_dim: int = 64, num_embeddings: int = 512,
                  num_downsampling_layers: int = 3, num_residual_layers: int = 2,
-                 commitment_cost: float = 0.25, decay: float = 0.99, **_unused):
+                 commitment_cost: float = 0.25, decay: float = 0.99,
+                 dead_code_threshold: float = 1.0, **_unused):
         super().__init__()
         self.encoder = Encoder(in_channels, hidden_channels, embedding_dim,
                                 num_downsampling_layers, num_residual_layers)
         self.quantizer = VectorQuantizerEMA(num_embeddings, embedding_dim,
-                                             commitment_cost, decay)
+                                             commitment_cost, decay,
+                                             dead_code_threshold=dead_code_threshold)
         self.decoder = Decoder(in_channels, hidden_channels, embedding_dim,
                                 num_downsampling_layers, num_residual_layers)
 

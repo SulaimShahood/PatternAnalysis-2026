@@ -49,6 +49,13 @@ def build_argparser():
     parser.add_argument("--num-embeddings", type=int, default=512)
     parser.add_argument("--commitment-cost", type=float, default=0.25)
     parser.add_argument("--decay", type=float, default=0.99)
+    parser.add_argument(
+        "--dead-code-threshold", type=float, default=1.0,
+        help="EMA usage count below which a VQ-VAE codebook entry is "
+             "considered dead and gets reset to a real encoder output "
+             "(see modules.VectorQuantizerEMA.forward). Ignored by "
+             "--model autoencoder.",
+    )
     parser.add_argument("--num-downsampling-layers", type=int, default=3)
     parser.add_argument("--num-residual-layers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
@@ -79,6 +86,7 @@ def run_epoch(model, loader, device, optimizer=None):
     model.train() if training else model.eval()
 
     total_loss = total_recon = total_vq = total_ssim = total_perplexity = 0.0
+    total_revived = 0
     n_batches = 0
     n_perplexity_batches = 0
 
@@ -95,6 +103,11 @@ def run_epoch(model, loader, device, optimizer=None):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                # Dead-code revival happens inside VectorQuantizerEMA.forward()
+                # above (no-op for the Autoencoder's IdentityQuantizer, hence
+                # getattr with a 0 default); logged per epoch so a collapse
+                # recurring mid-run shows up in the detailed training log.
+                total_revived += getattr(model.quantizer, "last_num_revived", 0)
 
             ssim_mean, _, _ = batch_ssim(recon, batch)
 
@@ -113,6 +126,7 @@ def run_epoch(model, loader, device, optimizer=None):
         "vq_loss": total_vq / n_batches,
         "ssim": total_ssim / n_batches,
         "perplexity": (total_perplexity / n_perplexity_batches) if n_perplexity_batches else None,
+        "revived": total_revived if training else None,
     }
 
 
@@ -150,6 +164,15 @@ def plot_curves(history, model_name, figures_dir):
         plt.ylabel("codebook perplexity")
         plt.title(f"{model_name}: codebook perplexity (collapses toward 1)")
         plt.savefig(os.path.join(figures_dir, f"{model_name}_perplexity_curve.png"), dpi=150, bbox_inches="tight")
+        plt.close()
+
+    if any(r is not None for r in history["train_revived"]):
+        plt.figure()
+        plt.plot(epochs, [r if r is not None else 0 for r in history["train_revived"]])
+        plt.xlabel("epoch")
+        plt.ylabel("codes revived (dead-code reset count, summed over the epoch)")
+        plt.title(f"{model_name}: codebook dead-code revivals per epoch")
+        plt.savefig(os.path.join(figures_dir, f"{model_name}_revived_curve.png"), dpi=150, bbox_inches="tight")
         plt.close()
 
 
@@ -190,44 +213,58 @@ def main():
         decay=args.decay,
         num_downsampling_layers=args.num_downsampling_layers,
         num_residual_layers=args.num_residual_layers,
+        dead_code_threshold=args.dead_code_threshold,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     csv_path = os.path.join(args.output_dir, f"{args.model}_metrics.csv")
     checkpoint_path = os.path.join(args.output_dir, f"{args.model}_best.pt")
-    history = {"train_loss": [], "val_loss": [], "val_ssim": [], "val_perplexity": []}
+    history = {"train_loss": [], "val_loss": [], "val_ssim": [], "val_perplexity": [], "train_revived": []}
     best_val_ssim = float("-inf")
 
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
             "epoch", "train_loss", "train_recon_loss", "train_vq_loss",
-            "val_loss", "val_ssim", "val_perplexity",
+            "val_loss", "val_ssim", "val_perplexity", "codes_revived",
         ])
 
         for epoch in range(1, args.epochs + 1):
             train_metrics = run_epoch(model, train_loader, device, optimizer=optimizer)
             val_metrics = run_epoch(model, val_loader, device, optimizer=None)
 
+            if epoch == 1:
+                # Reports how many slices did not already match the
+                # canonical (256, 128) shape and needed dataset.py's
+                # pad_or_crop() -- see TRAINING_LOG.md.
+                print(
+                    f"  Shape fixups: {train_ds.num_shape_fixed}/{len(train_ds)} train slices, "
+                    f"{val_ds.num_shape_fixed}/{len(val_ds)} validation slices needed pad_or_crop."
+                )
+
             history["train_loss"].append(train_metrics["loss"])
             history["val_loss"].append(val_metrics["loss"])
             history["val_ssim"].append(val_metrics["ssim"])
             history["val_perplexity"].append(val_metrics["perplexity"])
+            history["train_revived"].append(train_metrics["revived"])
 
             writer.writerow([
                 epoch, train_metrics["loss"], train_metrics["recon_loss"], train_metrics["vq_loss"],
                 val_metrics["loss"], val_metrics["ssim"], val_metrics["perplexity"],
+                train_metrics["revived"],
             ])
             f.flush()
 
             perplexity_str = f"{val_metrics['perplexity']:.1f}" if val_metrics["perplexity"] is not None else "n/a"
+            revived_str = f"{train_metrics['revived']}" if train_metrics["revived"] is not None else "n/a"
             print(
                 f"[{args.model}] epoch {epoch:03d}/{args.epochs} "
                 f"train_loss={train_metrics['loss']:.4f} "
                 f"val_loss={val_metrics['loss']:.4f} "
                 f"val_ssim={val_metrics['ssim']:.4f} "
-                f"val_perplexity={perplexity_str}"
+                f"val_perplexity={perplexity_str} "
+                f"codes_revived={revived_str}"
             )
 
             if val_metrics["perplexity"] is not None and val_metrics["perplexity"] < args.num_embeddings * 0.02:

@@ -34,6 +34,51 @@ def is_segmentation_file(filename: str) -> bool:
     return 'seg' in os.path.basename(filename).lower()
 
 
+# Most HipMRI slices are (256, 128), but a minority of patients were
+# scanned with a slightly different field of view and come out as
+# (256, 144) -- discovered when a real (non-smoke) training run crashed
+# with "stack expects each tensor to be equal size" partway through the
+# first epoch (see TRAINING_LOG.md). Every slice is forced to this exact
+# shape before being returned, below.
+TARGET_H, TARGET_W = 256, 128
+
+
+def pad_or_crop(tensor, target_h=TARGET_H, target_w=TARGET_W):
+    """Force a (C, H, W) tensor to exactly (C, target_h, target_w) by
+    centre-cropping any excess and zero-padding any shortfall on each
+    spatial dimension independently.
+
+    Deliberately not a resize/interpolation: interpolating would blur
+    real pixel intensities before the model (or the SSIM metric) ever
+    sees them, which would quietly contaminate the fidelity comparison
+    this project is built around. Cropping/padding only ever removes or
+    adds a narrow margin (observed mismatches are at most 16px) and never
+    alters a single pixel value that survives.
+    """
+    _, h, w = tensor.shape
+
+    def fit_dim(t, dim, current, target):
+        if current == target:
+            return t
+        if current > target:
+            start = (current - target) // 2
+            idx = torch.arange(start, start + target)
+            return t.index_select(dim, idx)
+        total_pad = target - current
+        pad_before = total_pad // 2
+        pad_after = total_pad - pad_before
+        pad = [0, 0, 0, 0]  # (W_left, W_right, H_top, H_bottom), F.pad order
+        if dim == 1:  # height
+            pad[2], pad[3] = pad_before, pad_after
+        else:  # width
+            pad[0], pad[1] = pad_before, pad_after
+        return torch.nn.functional.pad(t, pad, mode="constant", value=0.0)
+
+    tensor = fit_dim(tensor, 1, h, target_h)
+    tensor = fit_dim(tensor, 2, tensor.shape[2], target_w)
+    return tensor
+
+
 def verify_patient_level_split(data_dir, splits=('train', 'validate', 'test')):
     """
     Confirm that no patient's slices appear in more than one split.
@@ -103,6 +148,11 @@ class HipMRISlices(Dataset):
         if early_stop:
             self.files = self.files[:128]
 
+        # How many slices didn't already match (256, 128) and needed
+        # pad_or_crop() in __getitem__ -- surfaced by train.py / predict.py
+        # for the training log, not just silently patched over.
+        self.num_shape_fixed = 0
+
     def __len__(self):
         return len(self.files)
 
@@ -129,7 +179,14 @@ class HipMRISlices(Dataset):
         image_data = np.expand_dims(image_data, axis=0)
 
         # Convert to float32 tensor
-        return torch.tensor(image_data, dtype=torch.float32)
+        tensor = torch.tensor(image_data, dtype=torch.float32)
+
+        # Force every slice to the same (256, 128) shape -- see
+        # pad_or_crop() above for why this is a crop/pad, not a resize.
+        if tensor.shape[1] != TARGET_H or tensor.shape[2] != TARGET_W:
+            self.num_shape_fixed += 1
+            tensor = pad_or_crop(tensor)
+        return tensor
 
 
 if __name__ == '__main__':
