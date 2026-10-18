@@ -219,6 +219,73 @@ to confirm the dead-code fix is also doing its job on the real dataset.**
 
 ---
 
+## 2026-10-17 -- First real training run, part 2: autoencoder succeeds, VQVAE hits CUDA OOM
+
+**Ran:** the same `sbatch train.slurm vqvae` / `sbatch train.slurm
+autoencoder` from the previous entry, after the `pad_or_crop` fix.
+
+**Result -- autoencoder baseline:** ran all 30 epochs to completion.
+`Shape fixups: 60/11460 train slices, 0/660 validation slices needed
+pad_or_crop` confirms the size-mismatch fix is working and shows exactly
+how common the bug was (60 out of 11,460 -- about 0.5%). Final checkpoint
+at epoch 30: **best validation SSIM = 0.9696.** Comfortably clears the
+0.6 feasibility target -- this is the working fallback/baseline the
+feasibility review promised.
+
+**Result -- VQVAE, the good news first:** the dead-code-revival fix from
+2026-10-14 is demonstrably working on real data, not just in theory:
+
+| epoch | val_ssim | val_perplexity | codes_revived |
+|-------|----------|----------------|----------------|
+| 1     | 0.5377   | 232.6          | 1836           |
+| 2     | 0.6730   | 335.7          | 189            |
+| 3     | 0.6892   | 414.2          | 36             |
+
+Perplexity climbing from 232 to 414 (out of a possible 512) and
+`codes_revived` collapsing from 1836 down to 36 within 3 epochs is
+exactly the predicted signature: nearly every code looked "dead" against
+the all-zero initial EMA usage count on epoch 1 (expected -- that's the
+real-data codebook seeding effect noted in the 10-14 entry), and by epoch
+3 the codebook has mostly settled onto real, varied usage. Validation
+SSIM was already at 0.6892 by epoch 3, above target. **The codebook
+collapse problem is fixed.**
+
+**Result -- VQVAE, the bad news:** training crashed partway through
+(after epoch 3, before finishing) with `torch.OutOfMemoryError: CUDA out
+of memory`, having allocated **35.6 GB** of a 39.49 GB GPU -- not
+fragmentation (the error breaks out "35.60 GiB is allocated by PyTorch"
+specifically, as actually-live memory, vs. only 3.39 GiB "reserved but
+unallocated"). A model this size (hidden_channels=128, batch_size=32,
+256x128 images) has no legitimate reason to need anywhere near that much
+memory, so this is a genuine leak, not just "the model is big."
+
+**Why:** found in `modules.py`, `VectorQuantizerEMA.forward()`. The EMA
+buffer-update block was never wrapped in `torch.no_grad()`, despite its
+own comment claiming "no gradient involved." `dw = encodings.t() @ flat`
+uses `flat` (the encoder's output, which *does* require grad for
+backprop), so `dw` silently inherits `requires_grad=True`. That then
+"infects" `self.ema_w` and `self.embedding` -- both persistent buffers --
+through the in-place updates (`.add_(dw, ...)`, `.copy_(...)`), attaching
+a live autograd history to them. Because these buffers survive for the
+*entire* training run rather than being freed after each batch (unlike
+ordinary activations), that attached history grew by one more linked
+batch every single step. A 2-epoch smoke test on 20-128 slices never ran
+enough batches for this to visibly matter; a real 30-epoch run over
+11,460 slices (~358 batches/epoch) does, reliably, around epoch 4.
+
+**Fix:** wrapped the entire EMA-update-and-dead-code-revival block in
+`with torch.no_grad():`. None of it needs to be differentiable -- the
+encoder's actual gradient signal comes through the straight-through
+estimator path later in `forward()`, not through this bookkeeping.
+
+**Status:** fix written and syntax-checked, not yet re-run. **Next step:
+push, pull on Rangpur, resubmit `sbatch train.slurm vqvae` (the
+autoencoder baseline is already done, no need to rerun it), and confirm
+it completes all 30 epochs without an OOM this time, with perplexity
+staying healthy throughout -- not just for the first 3 epochs.**
+
+---
+
 <!--
 Add new entries below this line as more runs happen, oldest to newest.
 Each entry should say: what command was run, what happened (quote the

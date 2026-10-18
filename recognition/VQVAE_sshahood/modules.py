@@ -180,41 +180,58 @@ class VectorQuantizerEMA(nn.Module):
         quantized = quantized.view(B, H, W, D).permute(0, 3, 1, 2).contiguous()
 
         if self.training:
-            # EMA update of per-code usage counts and the running sum of
-            # encoder vectors assigned to each code (no gradient involved)
-            cluster_size = encodings.sum(0)
-            self.ema_cluster_size.mul_(self.decay).add_(cluster_size, alpha=1 - self.decay)
+            # Everything in this block updates persistent buffers
+            # (self.ema_cluster_size, self.ema_w, self.embedding), not
+            # trainable parameters -- none of it should ever be part of
+            # the autograd graph. That matters more than it looks: `flat`
+            # (the encoder's output) requires grad, so `encodings.t() @
+            # flat` below would otherwise silently inherit
+            # requires_grad=True, which then "infects" the buffers it
+            # gets written into via the in-place updates. Because those
+            # buffers persist across the whole run rather than being
+            # freed after each batch, that attached history would grow by
+            # one more linked batch every single step -- exactly the slow
+            # climb to a CUDA out-of-memory crash partway through a real
+            # (many-epoch) training run that a short smoke test never
+            # runs long enough to expose. `torch.no_grad()` keeps every
+            # tensor computed in here detached from the start.
+            with torch.no_grad():
+                # EMA update of per-code usage counts and the running sum
+                # of encoder vectors assigned to each code
+                cluster_size = encodings.sum(0)
+                self.ema_cluster_size.mul_(self.decay).add_(cluster_size, alpha=1 - self.decay)
 
-            dw = encodings.t() @ flat
-            self.ema_w.mul_(self.decay).add_(dw, alpha=1 - self.decay)
+                dw = encodings.t() @ flat
+                self.ema_w.mul_(self.decay).add_(dw, alpha=1 - self.decay)
 
-            # Laplace smoothing so a code with zero hits this batch isn't
-            # divided by (near) zero
-            n = self.ema_cluster_size.sum()
-            smoothed_cluster_size = (
-                (self.ema_cluster_size + self.epsilon)
-                / (n + self.num_embeddings * self.epsilon) * n
-            )
-            self.embedding.copy_(self.ema_w / smoothed_cluster_size.unsqueeze(1))
+                # Laplace smoothing so a code with zero hits this batch
+                # isn't divided by (near) zero
+                n = self.ema_cluster_size.sum()
+                smoothed_cluster_size = (
+                    (self.ema_cluster_size + self.epsilon)
+                    / (n + self.num_embeddings * self.epsilon) * n
+                )
+                self.embedding.copy_(self.ema_w / smoothed_cluster_size.unsqueeze(1))
 
-            # Dead-code revival. A code that is never any encoder vector's
-            # nearest neighbour never appears in `encodings`, so it never
-            # gets an EMA update either -- it would otherwise stay dead
-            # forever once another code "wins" early (exactly what
-            # happened in the smoke test: perplexity stuck at 1.0).
-            # Instead, any code whose running usage has stayed below
-            # dead_code_threshold is reset to a real encoder output
-            # sampled from this batch, giving it a genuine fresh chance
-            # instead of leaving it permanently unused.
-            dead_codes = self.ema_cluster_size < self.dead_code_threshold
-            num_dead = int(dead_codes.sum().item())
-            if num_dead > 0:
-                random_rows = torch.randint(0, flat.shape[0], (num_dead,), device=flat.device)
-                revived = flat[random_rows].detach()
-                self.embedding[dead_codes] = revived
-                self.ema_w[dead_codes] = revived
-                self.ema_cluster_size[dead_codes] = 1.0
-            self.last_num_revived = num_dead
+                # Dead-code revival. A code that is never any encoder
+                # vector's nearest neighbour never appears in `encodings`,
+                # so it never gets an EMA update either -- it would
+                # otherwise stay dead forever once another code "wins"
+                # early (exactly what happened in the smoke test:
+                # perplexity stuck at 1.0). Instead, any code whose
+                # running usage has stayed below dead_code_threshold is
+                # reset to a real encoder output sampled from this batch,
+                # giving it a genuine fresh chance instead of leaving it
+                # permanently unused.
+                dead_codes = self.ema_cluster_size < self.dead_code_threshold
+                num_dead = int(dead_codes.sum().item())
+                if num_dead > 0:
+                    random_rows = torch.randint(0, flat.shape[0], (num_dead,), device=flat.device)
+                    revived = flat[random_rows].detach()
+                    self.embedding[dead_codes] = revived
+                    self.ema_w[dead_codes] = revived
+                    self.ema_cluster_size[dead_codes] = 1.0
+                self.last_num_revived = num_dead
         else:
             self.last_num_revived = 0
 
