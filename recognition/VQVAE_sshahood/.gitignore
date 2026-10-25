@@ -18,3 +18,8 @@ __pycache__/
 outputs/
 runs/
 *.csv.lock
+
+# Slurm job logs (useful while debugging on Rangpur, not part of the
+# submission itself)
+slurm_*.out
+slurm_*.err
