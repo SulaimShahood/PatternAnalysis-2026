@@ -128,7 +128,66 @@ discrete representation learning," in *Proc. NeurIPS*, 2017.
 
 ## Results
 
-> TODO: example inputs/outputs, training curves, reconstruction grids.
+Both models were trained for 30 epochs on the full dataset (11,460 train /
+660 validation / 540 test slices) on a Rangpur A100 GPU. See
+[`TRAINING_LOG.md`](TRAINING_LOG.md) for the full debugging history --
+three crashes before the first successful full run, then a codebook
+collapse and a CUDA memory leak, each diagnosed and fixed with evidence
+rather than guessed at.
+
+### Test-set metrics (held-out, never seen during training or checkpoint selection)
+
+| Model | Test SSIM | Target | Codebook perplexity |
+|---|---|---|---|
+| Autoencoder (baseline) | **0.974** | > 0.6 | n/a (no codebook) |
+| VQ-VAE | **0.809** | > 0.6 | ~370 / 512 codes in active use |
+
+> TODO (once the exact console numbers are on hand): add test PSNR (dB)
+> for both models alongside SSIM here.
+
+Both models clear the 0.6 feasibility target by a wide margin. The
+autoencoder's continuous bottleneck reconstructs almost perfectly;
+the VQ-VAE, constrained to describe every slice using a shared 512-entry
+"vocabulary", is measurably lossier -- see the reconstruction figure
+below, where fine muscle striations are visibly smoothed even though the
+main anatomy is preserved. That fidelity gap is not a failure: it is the
+VQ-VAE's defining trade-off, and it is the evidence the Investigation
+section below builds on to ask whether that lower fidelity corresponds to
+less patient-specific memorisation.
+
+### Training curves
+
+**VQ-VAE**
+
+![VQ-VAE training loss](figures/vqvae_loss_curve.png)
+![VQ-VAE validation SSIM](figures/vqvae_ssim_curve.png)
+![VQ-VAE codebook perplexity](figures/vqvae_perplexity_curve.png)
+![VQ-VAE dead-code revivals per epoch](figures/vqvae_revived_curve.png)
+
+Perplexity climbs from 232 to a peak of ~437 within the first 6 epochs
+(the dead-code-revival fix seeding the codebook from real encoder
+outputs; see `TRAINING_LOG.md`, 2026-10-14 and 2026-10-17 entries), then
+drifts gently down to ~370 by epoch 30. That gradual decline is the model
+consolidating onto the codes that matter for this dataset, not collapse
+-- collapse would mean a crash back toward 1, and 370/512 (~72% of the
+codebook) is still healthy, broad usage. `codes_revived` confirms this
+directly: it drops from 1836 in epoch 1 to effectively 0 by epoch 5 and
+stays there for the remaining 25 epochs, meaning the codebook stabilised
+early and never needed rescuing again.
+
+**Autoencoder baseline**
+
+![Autoencoder training loss](figures/autoencoder_loss_curve.png)
+![Autoencoder validation SSIM](figures/autoencoder_ssim_curve.png)
+![Autoencoder dead-code revivals per epoch](figures/autoencoder_revived_curve.png)
+
+The flat-zero revived-codes curve is expected and confirms the logging
+code handles the baseline's codebook-free `IdentityQuantizer` correctly
+rather than silently erroring.
+
+### Qualitative reconstructions
+
+![Original vs. Autoencoder vs. VQ-VAE reconstructions on test-set slices](figures/reconstruction_comparison.png)
 
 ## Investigation of the Open Research Dilemma
 
