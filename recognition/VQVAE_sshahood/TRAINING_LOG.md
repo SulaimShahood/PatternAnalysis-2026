@@ -286,6 +286,41 @@ staying healthy throughout -- not just for the first 3 epochs.**
 
 ---
 
+## 2026-10-25 -- predict.py: fixed import crash, switched to the test split, dropped hardcoded numbers
+
+**Ran:** `python predict.py` on a Rangpur CPU node (`srun --partition=cpu`).
+
+**Result:** Crashed immediately with
+`ImportError: cannot import name 'get_dataloaders' from 'dataset'` --
+`predict.py` called a helper function that `dataset.py` never defined.
+
+**Fix:** added `get_dataloaders(data_dir, batch_size, split_for_eval)` to
+`dataset.py`, mirroring the exact `DataLoader` construction `train.py`
+already uses (`drop_last=False`, shuffle only for the training split).
+
+**Also changed while fixing it (not just the crash):**
+1. The original draft evaluated on the **validation** split. Switched to
+   **test**: validation already influenced which checkpoint got saved
+   (`train.py` keeps the best-val-SSIM epoch), so it's no longer a clean
+   held-out measurement -- test is the one split that never touched
+   training or model selection at all.
+2. The comparison figure's subplot titles were hardcoded guesses
+   (`"SSIM: 0.96"`, `"SSIM: 0.77"`) rather than computed values.
+   `predict.py` now runs every model over the *entire* test set with
+   `utils.batch_ssim` / `batch_psnr` (the same metrics `train.py` already
+   uses for validation), reports the real mean SSIM/PSNR/perplexity for
+   both models, and writes them to `outputs/test_metrics.csv` -- this is
+   the source for the README's Results table and the dilemma
+   investigation's benchmarking table, so it needs to be the real number,
+   not a placeholder.
+
+**Status:** written and syntax-checked (`py_compile`), not yet run.
+**Next step: push, pull on Rangpur, and run `python predict.py` once the
+re-run VQVAE training (previous entry) has finished and
+`outputs/vqvae_best.pt` exists.**
+
+---
+
 <!--
 Add new entries below this line as more runs happen, oldest to newest.
 Each entry should say: what command was run, what happened (quote the

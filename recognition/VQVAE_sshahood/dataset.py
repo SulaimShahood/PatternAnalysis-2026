@@ -189,6 +189,27 @@ class HipMRISlices(Dataset):
         return tensor
 
 
+def get_dataloaders(data_dir, batch_size=32, split_for_eval='test'):
+    """Convenience wrapper for anything that just wants ready-to-use
+    DataLoaders without repeating the DataLoader setup (used by
+    predict.py). Mirrors train.py's own construction: drop_last=False
+    everywhere (no BatchNorm in modules.py, so no reason to drop a
+    partial batch) and shuffle only for the training split.
+
+    Returns (train_loader, eval_loader), where eval_loader comes from
+    `split_for_eval` -- 'test' by default, deliberately not 'validate'.
+    The validation split already influenced which checkpoint got saved
+    (train.py picks the best-val-SSIM epoch), so *final* reported numbers
+    belong on 'test', the one split that never affected training or
+    model selection at all.
+    """
+    train_ds = HipMRISlices(data_dir, split='train')
+    eval_ds = HipMRISlices(data_dir, split=split_for_eval)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False)
+    eval_loader = DataLoader(eval_ds, batch_size=batch_size, shuffle=False, drop_last=False)
+    return train_loader, eval_loader
+
+
 if __name__ == '__main__':
     # Smoke Test
     # Point this to a local dummy folder for Mac testing, or the Rangpur path when on HPC
