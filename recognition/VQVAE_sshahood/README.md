@@ -134,6 +134,14 @@ slices, and 540 test slices. Every slice is exactly 256 x 128 pixels, and
 both numbers divide evenly by the encoder's planned downsampling factor of
 8, so no padding or cropping is needed.
 
+> **Correction (2026-10-17):** this turned out to be wrong. A minority of
+> slices (about 0.5%) are actually (256, 144), only found once real
+> training ran on the full dataset rather than the smoke-test subset this
+> audit sampled from. See Data and Preprocessing below for the fix. Left
+> here unedited, with this note, rather than silently rewritten, because
+> this section is a record of what was known *at the feasibility
+> check-off*, not a living summary.
+
 The dataset folders ship pre-split, but checking for patient overlap
 uncovered a bug: the code was reading the wrong part of the filename as the
 patient ID. This has been fixed to read the actual numerical ID (e.g. 040),
@@ -294,7 +302,7 @@ rather than guessed at.
 | Model | Test SSIM | Test PSNR (dB) | Target | Codebook perplexity (test set) |
 |---|---|---|---|---|
 | Autoencoder (baseline) | **0.9738** | **36.38** | > 0.6 | n/a (no codebook) |
-| VQ-VAE | **0.8090** | **27.60** | > 0.6 | ~360 / 512 codes in active use |
+| VQ-VAE | **0.8090** | **27.60** | > 0.6 | ~360 (effective, out of 512) |
 
 Both models clear the 0.6 feasibility target by a wide margin. The
 autoencoder's continuous bottleneck reconstructs almost perfectly;
@@ -360,7 +368,7 @@ transcribed exactly from them).
 | Model | Test SSIM | Test PSNR (dB) | Codebook perplexity | Memorisation signal (see below) |
 |---|---|---|---|---|
 | Autoencoder (baseline) | 0.9738 | 36.38 | n/a | none detected by this probe |
-| VQ-VAE | 0.8090 | 27.60 | ~360/512 active | none detected by this probe |
+| VQ-VAE | 0.8090 | 27.60 | ~360 effective (of 512) | none detected by this probe |
 
 ### Resource profiling
 
@@ -369,8 +377,8 @@ runs, one A100 GPU each:
 
 | Model | Job ID | Wall-clock time | Host RAM (MaxRSS) |
 |---|---|---|---|
-| Autoencoder | 668649 | 00:24:26 | 1.03 GB |
-| VQ-VAE (fixed) | 671705 | 00:25:22 | 3.01 GB |
+| Autoencoder | 668649 | 00:24:26 | 1,027,500 KB (~1,003 MB) |
+| VQ-VAE (fixed) | 671705 | 00:25:22 | 3,008,956 KB (~2,938 MB) |
 
 Standard Slurm accounting (`sacct`'s `MaxRSS`) reports host/CPU memory,
 not GPU VRAM, so these numbers are *not* directly comparable to the
@@ -378,7 +386,7 @@ not GPU VRAM, so these numbers are *not* directly comparable to the
 `TRAINING_LOG.md` (2026-10-17) -- that figure came from PyTorch's own
 CUDA error message, not from the job scheduler. Taken together, though,
 they tell a consistent story: the VQ-VAE costs noticeably more host
-memory than the autoencoder (3.01GB vs. 1.03GB, roughly 3x, consistent
+memory than the autoencoder (~2.9GB vs. ~1.0GB, roughly 3x, consistent
 with the extra codebook bookkeeping -- distance computation against 512
 codes, EMA buffers, dead-code revival -- that the autoencoder's
 `IdentityQuantizer` skips entirely), while wall-clock time is nearly
@@ -539,21 +547,27 @@ summarises the role AI played and how its output was checked.
   `VectorQuantizerEMA`, `IdentityQuantizer`), `dataset.py`, and the
   `train.py` training loop, from a plan I had already scoped against the
   assignment spec.
-- Diagnosing and fixing five real runtime bugs hit on Rangpur's actual
+- Diagnosing and fixing six real runtime bugs hit on Rangpur's actual
   GPU cluster, each with a specific technical explanation rather than a
   guess: a `ZeroDivisionError` from `drop_last` dropping the only batch
   on a small dataset; a `RuntimeError` from an in-place ReLU corrupting a
   residual connection's gradient; a `NotImplementedError` from
   `VectorQuantizerEMA.forward` losing its class indentation during a
   manual edit of my own; the codebook collapse (perplexity stuck at 1.0)
-  seen in the smoke test, fixed with a dead-code-revival mechanism; and a
-  CUDA out-of-memory crash on the first full training run, traced to the
-  EMA codebook update silently picking up a live gradient history that
-  grew every batch, fixed by wrapping that block in `torch.no_grad()`.
-- Writing `predict.py` and `dilemma.py` (the test-set evaluation,
-  memorisation audit, latent interpolation, and failure-autopsy code),
-  and drafting most of this README, `TRAINING_LOG.md`, and the
-  feasibility review.
+  seen in the smoke test, fixed with a dead-code-revival mechanism; a
+  `RuntimeError` from a minority of slices being (256, 144) instead of
+  (256, 128), only surfacing once real (non-smoke) training ran on the
+  full dataset, fixed with `dataset.pad_or_crop()`; and a CUDA
+  out-of-memory crash on the first full training run, traced to the EMA
+  codebook update silently picking up a live gradient history that grew
+  every batch, fixed by wrapping that block in `torch.no_grad()`.
+- Writing `predict.py` (originally crashed on a missing `get_dataloaders`
+  import; while fixing it, also switched its evaluation from the
+  validation split to the held-out test split, and replaced hardcoded
+  placeholder SSIM numbers in its comparison figure with real computed
+  metrics) and `dilemma.py` (the memorisation audit, latent
+  interpolation, and failure-autopsy code), and drafting most of this
+  README, `TRAINING_LOG.md`, and the feasibility review.
 - Explaining course concepts on request while preparing for the
   compulsory feasibility check-off -- SSIM, the straight-through
   estimator, why the codebook lookup has no gradient, and how the EMA
