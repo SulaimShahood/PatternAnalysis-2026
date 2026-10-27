@@ -511,5 +511,58 @@ reasonable first check but not a strong enough one to deploy on alone.
 
 ## Artificial Intelligence Usage Disclosure
 
-> TODO: which AI tools were used, what specific tasks they assisted with,
-> and how outputs were audited/verified/tested. Mandatory, exact heading.
+Claude (Anthropic) was used throughout this project as a pair-programming
+assistant, in an interactive, conversational workflow rather than a single
+one-off generation. The full chronology of what was tried, what broke, and
+what was changed is in [`TRAINING_LOG.md`](TRAINING_LOG.md); this section
+summarises the role AI played and how its output was checked.
+
+**What it assisted with:**
+
+- Initial design and implementation of `modules.py` (encoder, decoder,
+  `VectorQuantizerEMA`, `IdentityQuantizer`), `dataset.py`, and the
+  `train.py` training loop, from a plan I had already scoped against the
+  assignment spec.
+- Diagnosing and fixing five real runtime bugs hit on Rangpur's actual
+  GPU cluster, each with a specific technical explanation rather than a
+  guess: a `ZeroDivisionError` from `drop_last` dropping the only batch
+  on a small dataset; a `RuntimeError` from an in-place ReLU corrupting a
+  residual connection's gradient; a `NotImplementedError` from
+  `VectorQuantizerEMA.forward` losing its class indentation during a
+  manual edit of my own; the codebook collapse (perplexity stuck at 1.0)
+  seen in the smoke test, fixed with a dead-code-revival mechanism; and a
+  CUDA out-of-memory crash on the first full training run, traced to the
+  EMA codebook update silently picking up a live gradient history that
+  grew every batch, fixed by wrapping that block in `torch.no_grad()`.
+- Writing `predict.py` and `dilemma.py` (the test-set evaluation,
+  memorisation audit, latent interpolation, and failure-autopsy code),
+  and drafting most of this README, `TRAINING_LOG.md`, and the
+  feasibility review.
+- Explaining course concepts on request while preparing for the
+  compulsory feasibility check-off -- SSIM, the straight-through
+  estimator, why the codebook lookup has no gradient, and how the EMA
+  update differs from gradient-descent codebook learning -- which I was
+  then able to explain back during the consultation itself.
+
+**What I did without AI assistance:** the Rangpur/Slurm environment setup
+(partition, account, conda environment activation in `train.slurm`),
+several of my own debugging commits during the smoke-test phase (see
+`TRAINING_LOG.md` and the git history on the `topic-recognition` branch),
+all Git/GitHub/SSH authentication troubleshooting, and every decision
+about what to actually submit.
+
+**How outputs were audited:** every code change was syntax-checked
+(`python -m py_compile`) before being run, and nothing in this report is
+AI-generated numbers or estimates -- every figure and metric quoted here
+(SSIM, PSNR, perplexity, the codebook total-variation distance, the
+failure-case filenames and scores) was produced by actually running
+`train.py`, `predict.py`, or `dilemma.py` on Rangpur's GPU against the
+real dataset, and is transcribed from the resulting console output or
+CSV files (`outputs/*.csv`, gitignored alongside the checkpoints, but
+the exact numbers are quoted directly in this README and in
+`TRAINING_LOG.md`). Each proposed bug fix was treated as a hypothesis,
+not an answer: it was only accepted once the next real run's behaviour
+confirmed it -- e.g. the codebook-collapse fix wasn't considered done
+until perplexity was actually observed climbing on real training data,
+and the OOM fix wasn't considered done until a full 30-epoch run actually
+completed without crashing.
