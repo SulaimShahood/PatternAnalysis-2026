@@ -191,9 +191,172 @@ rather than silently erroring.
 
 ## Investigation of the Open Research Dilemma
 
-> TODO: benchmarking table vs. baseline, resource profiling table,
-> memorisation audit, latent interpolation figure, 3-5 failure autopsies,
-> recommendation to the project manager.
+**The dilemma:** the Results section already shows the VQ-VAE is measurably
+lossier than the plain autoencoder (test SSIM 0.809 vs. 0.974). Forcing
+every image through a finite, shared 512-entry codebook is a real cost.
+Is it buying anything back? Specifically: does that forced bottleneck make
+the VQ-VAE less able to memorise individual training patients than the
+unconstrained autoencoder -- a genuine privacy argument for accepting
+lower fidelity -- or is the fidelity simply lost for nothing? This section
+gathers evidence rather than assuming an answer either way. All numbers
+come from `dilemma.py` (full script in this folder); raw output is in
+`outputs/memorisation_audit.csv` and `outputs/test_metrics.csv`
+(gitignored alongside the checkpoints -- the numbers below are
+transcribed exactly from them).
+
+### Benchmarking table
+
+| Model | Test SSIM | Test PSNR (dB) | Codebook perplexity | Memorisation signal (see below) |
+|---|---|---|---|---|
+| Autoencoder (baseline) | 0.9738 | 36.38 | n/a | none detected by this probe |
+| VQ-VAE | 0.8090 | 27.60 | ~360/512 active | none detected by this probe |
+
+### Resource profiling
+
+> TODO: `seff <job_id>` for both full 30-epoch training runs (wall-clock
+> time, peak memory) -- not yet collected. One concrete number already on
+> record from debugging: the VQ-VAE's first attempt at a full run
+> allocated 35.6GB and crashed from a gradient-tracking bug (fixed; see
+> `TRAINING_LOG.md`, 2026-10-17), so the *fixed* version's real memory
+> footprint is still worth recording precisely rather than assumed small.
+
+### Memorisation audit
+
+The most direct check: does either model do suspiciously better on a
+random sample of its own training data than on the test patients it never
+saw? A random, fixed-size sample of 540 training slices (matching the
+test set's size, so the comparison isn't confounded by sample size) was
+evaluated the same way as the test set.
+
+| Model | Train-sample SSIM | Test SSIM | Gap (train − test) |
+|---|---|---|---|
+| VQ-VAE | 0.7898 | 0.8090 | **−0.0193** |
+| Autoencoder | 0.9704 | 0.9738 | **−0.0034** |
+
+Both gaps are slightly *negative* -- both models reconstruct the held-out
+test set marginally better than a random training sample, not worse. A
+positive gap (train performance inflated above test) is the classic
+memorisation signature; neither model shows it. Read narrowly, this says
+neither model is grossly overfitting to individual training images in a
+way that shows up as inflated train-set SSIM.
+
+That said, this is a weak probe, and a weak probe returning a null result
+is not strong evidence of safety -- it only means *this particular test*
+didn't catch anything. A model could still memorise fine-grained,
+patient-identifying texture that doesn't move the aggregate SSIM gap at
+all. A proper privacy audit would need a sharper tool (e.g. a
+membership-inference-style test, or nearest-training-neighbour distance
+correlated with reconstruction error) than the one built here, and that
+is flagged explicitly as future work in the recommendation below rather
+than glossed over.
+
+**VQ-VAE-specific check: does the codebook itself generalise?** Unlike the
+autoencoder, the VQ-VAE's bottleneck is a finite, shared vocabulary learned
+from training patients. If describing an unseen test patient required a
+visibly different mix of codes than training patients use, that would
+suggest the codebook has specialised to specific training images rather
+than general anatomy. `dilemma.py` compares the codebook's usage
+distribution (what fraction of all encoder positions land on each of the
+512 entries) between the training sample and the test set:
+
+![VQ-VAE codebook usage: train sample vs. test](figures/codebook_usage_train_vs_test.png)
+
+The two distributions are nearly identical (total-variation distance =
+**0.062**, where 0 = identical and 1 = completely disjoint). The same
+roughly 350-400 codes that describe training patients also describe test
+patients, in close to the same proportions. This is a genuine point in
+the VQ-VAE's favour that the autoencoder has no equivalent of: its
+"vocabulary" is shared and demonstrably not patient-specific.
+
+### Latent interpolation
+
+Walking between two test slices in latent space and decoding every step
+tests whether the learned representation is smooth and generalisable, or
+just a lookup table of memorised points (which would produce garbage
+between them):
+
+![Latent interpolation between two test slices, VQ-VAE and autoencoder](figures/latent_interpolation.png)
+
+Both models produce a smooth, anatomically plausible transition -- the
+bright circular structure gradually changes shape and the surrounding
+tissue morphs continuously, with no sudden jumps or artefacts at any
+intermediate step. This held even for the VQ-VAE, which was the more
+surprising result going in: interpolating in the *continuous*
+pre-quantisation space and re-quantising at every step could plausibly
+have produced visible jumps whenever the interpolated point crossed from
+one code's territory to another's, but the decoder appears smooth enough
+across nearby codes that no such discontinuity is visible. Both models
+pass this check; neither shows the "memorised isolated points" failure
+mode.
+
+### Failure-case autopsies
+
+The 5 worst test-set reconstructions by SSIM, for each model:
+
+![VQ-VAE worst 5 test reconstructions](figures/vqvae_failure_cases.png)
+![Autoencoder worst 5 test reconstructions](figures/autoencoder_failure_cases.png)
+
+**VQ-VAE (worst SSIM 0.729-0.735):** all five worst cases are consecutive
+slices (36, 38, 39, 40, 41) from a single patient, `case_042`. This is not
+five independent failures -- it's one systematic weak spot. The slices
+show denser, more granular internal texture than the simpler
+bladder-dominated slices typical elsewhere in the dataset, and the VQ-VAE
+visibly over-smooths this region, losing the fine granularity while still
+preserving the overall shape and boundaries. This reads as a
+*representation* limitation (this particular texture pattern is
+under-represented in what the 512-entry codebook learned to describe)
+rather than a random failure, which matters for the privacy argument:
+a systematic blind spot on one patient's specific anatomy is a
+*weaker* fidelity hit than it first looks (it is not reconstructing that
+patient any better than it reconstructs anyone else -- if anything,
+worse), but it also means the codebook has not specialised to memorise
+that patient's detail, consistent with the audit above.
+
+**Autoencoder (worst SSIM 0.962-0.963):** worth stating plainly -- these
+are not real failures. The autoencoder's "worst" reconstructions on the
+entire test set are still visually almost indistinguishable from the
+originals. Its weakest cases (`case_042`/`case_040`, slices 57-59) show
+fine muscle striations very slightly softened, nothing more. This itself
+is informative for the dilemma: the autoencoder has essentially *no*
+regime where it fails to reconstruct a patient with high fidelity, which
+is exactly the property that makes its memorisation risk (even though
+this audit's SSIM-gap probe didn't detect it directly) a live concern
+rather than a hypothetical one -- there's no fidelity ceiling pushing back
+against it anywhere in this dataset.
+
+### Recommendation to the project manager
+
+Neither model showed an overt memorisation signature under the tests run
+here, so this is not a case of "the VQ-VAE is safe and the autoencoder is
+not" -- the evidence doesn't support that strong a claim. What the
+evidence does support:
+
+1. The VQ-VAE's codebook is demonstrably shared and general (TV distance
+   0.062 between train and test usage), which is a structural privacy
+   property the autoencoder cannot offer by construction -- there is
+   nothing analogous to audit in a free-form continuous bottleneck.
+2. That structural property costs roughly 0.16 SSIM (0.974 -> 0.809) and
+   is concentrated as a systematic weak spot on unusual anatomy rather
+   than spread evenly, which matters if this model is ever used for
+   diagnostic-adjacent purposes rather than only data augmentation.
+3. The memorisation probe used here (train-vs-test SSIM gap) is a
+   deliberately simple first pass, and a null result from it is weak
+   evidence of safety either way.
+
+**Recommendation:** for any deployment where reconstructions, codes, or
+derived synthetic images might leave a controlled environment (shared
+with collaborators, used to generate a public synthetic dataset, etc.),
+prefer the VQ-VAE and treat its lower fidelity as the cost of a real,
+structural privacy property rather than a pure downside. For purely
+internal use where maximum fidelity matters and nothing derived from the
+model ever leaves a trusted environment, the autoencoder's near-perfect
+reconstruction is hard to justify giving up. Before trusting either
+model's privacy properties for a real deployment, the next step should be
+a sharper memorisation test than the one here -- e.g. a
+membership-inference-style classifier, or correlating reconstruction
+error with each test image's distance to its nearest training neighbour
+-- since the simple SSIM-gap test used in this investigation is a
+reasonable first check but not a strong enough one to deploy on alone.
 
 ## Artificial Intelligence Usage Disclosure
 
