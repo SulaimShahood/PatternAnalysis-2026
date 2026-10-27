@@ -364,12 +364,28 @@ transcribed exactly from them).
 
 ### Resource profiling
 
-> TODO: `seff <job_id>` for both full 30-epoch training runs (wall-clock
-> time, peak memory) -- not yet collected. One concrete number already on
-> record from debugging: the VQ-VAE's first attempt at a full run
-> allocated 35.6GB and crashed from a gradient-tracking bug (fixed; see
-> `TRAINING_LOG.md`, 2026-10-17), so the *fixed* version's real memory
-> footprint is still worth recording precisely rather than assumed small.
+From Rangpur's Slurm accounting (`sacct`) for both full 30-epoch training
+runs, one A100 GPU each:
+
+| Model | Job ID | Wall-clock time | Host RAM (MaxRSS) |
+|---|---|---|---|
+| Autoencoder | 668649 | 00:24:26 | 1.03 GB |
+| VQ-VAE (fixed) | 671705 | 00:25:22 | 3.01 GB |
+
+Standard Slurm accounting (`sacct`'s `MaxRSS`) reports host/CPU memory,
+not GPU VRAM, so these numbers are *not* directly comparable to the
+35.6GB GPU out-of-memory figure from the pre-fix crash in
+`TRAINING_LOG.md` (2026-10-17) -- that figure came from PyTorch's own
+CUDA error message, not from the job scheduler. Taken together, though,
+they tell a consistent story: the VQ-VAE costs noticeably more host
+memory than the autoencoder (3.01GB vs. 1.03GB, roughly 3x, consistent
+with the extra codebook bookkeeping -- distance computation against 512
+codes, EMA buffers, dead-code revival -- that the autoencoder's
+`IdentityQuantizer` skips entirely), while wall-clock time is nearly
+identical (~25 minutes either way, so the quantisation step itself is
+cheap relative to the shared encoder/decoder). Both are comfortably
+affordable on a single Rangpur A100 node within the 4-hour Slurm time
+limit requested in `train.slurm`.
 
 ### Memorisation audit
 
