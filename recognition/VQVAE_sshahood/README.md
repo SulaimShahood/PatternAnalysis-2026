@@ -1,13 +1,84 @@
 # VQ-VAE for HipMRI Prostate Slice Reconstruction
 
-> TODO: one-paragraph description of the algorithm and the problem it solves,
-> plus the architecture figure, goes here.
+A VQ-VAE (Vector-Quantised Variational Autoencoder, van den Oord et al.,
+2017) that learns to compress and reconstruct 2D prostate MRI slices from
+the HipMRI dataset, built alongside a plain convolutional autoencoder as a
+required baseline. Both models share an identical encoder and decoder;
+the only difference between them is whether the bottleneck in the middle
+is a continuous vector (autoencoder) or a vector snapped to the nearest
+entry in a learned, finite 512-entry codebook (VQ-VAE). That one-variable
+difference is what the whole second half of this README is about: the
+VQ-VAE reconstructs slices measurably less perfectly than the autoencoder
+(test SSIM 0.809 vs. 0.974 -- see Results), and the Investigation section
+asks whether that forced information bottleneck buys back something a
+real deployment would care about -- specifically, whether it makes the
+model less able to memorise individual training patients.
+
+```
+MRI slice (1, 256, 128)
+      |
+   Encoder  (strided convs, downsample x8)
+      |
+ (64, 32, 16) continuous feature grid
+      |
+ Vector Quantiser  -- VQ-VAE only; the autoencoder skips straight to the decoder
+  (snap every position to its nearest of 512 learned codebook vectors)
+      |
+ (64, 32, 16) quantised feature grid
+      |
+   Decoder  (transposed convs, upsample x8)
+      |
+Reconstructed slice (1, 256, 128)
+```
 
 ## How It Works
 
-> TODO: paragraph on the VQ-VAE mechanism -- encoder, codebook lookup,
-> straight-through estimator, the three loss terms (reconstruction,
-> codebook, commitment) with the loss equation.
+The encoder (`modules.Encoder`) downsamples each slice by a factor of 8
+through three stride-2 convolutions plus a residual stack, producing a
+64-channel, 32x16 feature grid. For the VQ-VAE, every one of those 512
+spatial positions is independently replaced by its nearest match (squared
+Euclidean distance) in a learned codebook of 512 64-dimensional vectors --
+`VectorQuantizerEMA` in `modules.py`. That "replace with nearest match"
+step has no gradient (a hard argmin isn't differentiable), so two things
+make training possible anyway:
+
+- **Straight-through estimator:** on the forward pass the quantised
+  vector is used as normal, but the backward pass treats the quantisation
+  step as the identity function, copying the decoder's gradient straight
+  back onto the encoder's output as if the lookup never happened
+  (`z_q = z_e + (quantized - z_e).detach()` in `VectorQuantizerEMA.forward`).
+- **EMA codebook update:** rather than being learned by gradient descent
+  (as in the original paper's simplest formulation), each codebook vector
+  is nudged towards a running exponential moving average of the encoder
+  outputs most recently matched to it. This is more stable and far less
+  prone to codebook collapse than a gradient-based update -- though not
+  immune to it; see `TRAINING_LOG.md` for the real collapse this project
+  hit during the smoke test, and the dead-code-revival fix added on top
+  of the EMA update to recover from it.
+
+The training loss has two terms:
+
+```
+loss = reconstruction_loss + commitment_loss
+reconstruction_loss = MSE(decoder(z_q), original_slice)
+commitment_loss     = commitment_cost * MSE(z_e, stop_gradient(z_q))
+```
+
+There is no separate "codebook loss" term here (present in the original
+paper's formulation) because the EMA update above already moves the
+codebook towards the encoder's outputs directly, making a second
+gradient-based pull redundant. The commitment loss instead pulls the
+*encoder* towards whichever code it keeps being matched to, preventing
+its output from drifting arbitrarily far from the codebook (which would
+otherwise let `vq_loss` and the reconstruction quality become unstable
+against each other). `commitment_cost = 0.25` throughout, matching the
+original paper's default.
+
+The autoencoder baseline (`modules.Autoencoder`) uses the identical
+`Encoder`/`Decoder`, but swaps `VectorQuantizerEMA` for `IdentityQuantizer`
+-- a no-op that passes the continuous feature grid straight through. This
+isolates discretisation as the single variable being compared throughout
+this report.
 
 ## Feasibility Review
 
@@ -114,17 +185,100 @@ discrete representation learning," in *Proc. NeurIPS*, 2017.
 
 ## Dependencies
 
-> TODO: exact versions (Python, PyTorch, nibabel, etc.) and a note on
-> reproducibility (seed, run-to-run variance).
+Trained and evaluated on Rangpur (UQ's HPC cluster) inside a conda
+environment named `torch`, Python 3.11, with a single A100 GPU
+(`--gres=gpu:1`, partition `comp3710`).
+
+| Package | Role |
+|---|---|
+| `torch` | model, training loop, autograd |
+| `torchvision` | not used by the final pipeline (an earlier resize-based fix to `dataset.py` was replaced with a crop/pad approach that doesn't need it -- see `TRAINING_LOG.md`, 2026-10-17) |
+| `nibabel` | loading `.nii`/`.nii.gz` MRI slice files |
+| `numpy` | array handling outside `modules.py` (explicitly disallowed inside it per the assignment spec) |
+| `scikit-image` | `structural_similarity` for the SSIM metric (`utils.py`) |
+| `matplotlib` | all training curves and figures (`Agg` backend -- no display on compute nodes) |
+
+> TODO: pin exact versions here (`pip freeze | grep -iE "torch|nibabel|scikit-image|numpy|matplotlib"` from the Rangpur `torch` environment) once collected.
+
+**Reproducibility:** `train.py` sets `torch.manual_seed(args.seed)`
+(default 42) before building the model or loaders. Note this does not
+guarantee bit-identical runs across different hardware/CUDA versions --
+only that re-running on the same Rangpur setup should reproduce the same
+training trajectory. Exact run-to-run variance was not separately
+measured (would require re-running full 30-epoch training multiple times,
+which the compute budget for this project did not allow for).
 
 ## Data and Preprocessing
 
-> TODO: dataset description, normalisation choice and why, train/val/test
-> split justification with the patient-leakage argument spelled out.
+The HipMRI 2D prostate dataset ships pre-split into `keras_slices_train`,
+`keras_slices_validate`, and `keras_slices_test` folders of `.nii.gz`
+files, 11,460 / 660 / 540 slices respectively. Only raw MRI slices are
+used -- `dataset.is_segmentation_file()` explicitly excludes any `seg_`
+file, after an early mistake during the dataset audit accidentally loaded
+one as if it were an image (see the Feasibility Review above).
+
+**Patient-level splitting.** The dataset ships pre-split, but nothing
+guarantees a single patient's slices don't appear in more than one split
+by filename coincidence -- and an early bug in `get_patient_id()` (reading
+the wrong part of the filename) would have silently allowed exactly that.
+Leakage here matters more than usual: a model that has seen *some* of a
+patient's slices during training could reconstruct their *other* slices
+suspiciously well not because it generalises, but because it has partial
+information about that specific patient's anatomy -- which would quietly
+inflate every metric in this report and undermine the whole memorisation
+investigation. `dataset.verify_patient_level_split()` checks this
+explicitly across all three splits and was run live on Rangpur: 31 / 4 / 3
+unique patients in train/validate/test, zero overlap.
+
+**Shape normalisation.** Most slices are (256, 128), but a minority
+(about 0.5%, 60 out of 11,460 training slices) are (256, 144) -- a
+different field of view, discovered when the first full training run
+crashed trying to batch mismatched shapes (`TRAINING_LOG.md`, 2026-10-17).
+Every slice is forced to exactly (256, 128) via `dataset.pad_or_crop()`:
+a centre-crop/zero-pad, deliberately not a resize. Resizing would
+interpolate (blur) real pixel intensities before the model or the SSIM
+metric ever see them, which would quietly contaminate the fidelity
+numbers this whole report is built on; cropping/padding only ever trims
+or adds a narrow margin (observed mismatches are at most 16px) without
+altering a single surviving pixel's value.
+
+**Normalisation.** Each slice is independently min-max normalised to
+[0, 1] (`(x - x.min()) / (x.max() - x.min())`), matching the decoder's
+sigmoid output and the MSE reconstruction loss.
 
 ## Usage
 
-> TODO: exact commands to train and predict, including the Slurm script.
+```bash
+# Patient-level leakage check only (no training)
+python dataset.py
+
+# Fast smoke test (2 epochs, a handful of slices) -- catches shape/
+# gradient errors cheaply before committing a real run
+python train.py --model vqvae --smoke
+python train.py --model autoencoder --smoke
+
+# Full training (30 epochs, full dataset) -- run via Slurm on Rangpur
+sbatch train.slurm vqvae
+sbatch train.slurm autoencoder
+
+# Final held-out test-set evaluation + reconstruction comparison figure
+# (needs outputs/vqvae_best.pt and outputs/autoencoder_best.pt from the
+# runs above)
+python predict.py
+
+# Dilemma investigation: memorisation audit, latent interpolation,
+# failure-case autopsies -- run via Slurm (needs a GPU)
+sbatch dilemma.slurm
+```
+
+Key `train.py` flags (all have sensible defaults -- see
+`build_argparser()`): `--model {vqvae,autoencoder}`, `--epochs`,
+`--batch-size`, `--dead-code-threshold` (VQ-VAE dead-code revival
+sensitivity, default 1.0), `--verify-split` (run the patient-leakage
+check before training starts). Every run writes
+`outputs/<model>_metrics.csv` (per-epoch loss/SSIM/perplexity/
+codes-revived), `outputs/<model>_best.pt` (best-validation-SSIM
+checkpoint), and `figures/<model>_*.png` (training curves).
 
 ## Results
 
@@ -137,13 +291,10 @@ rather than guessed at.
 
 ### Test-set metrics (held-out, never seen during training or checkpoint selection)
 
-| Model | Test SSIM | Target | Codebook perplexity |
-|---|---|---|---|
-| Autoencoder (baseline) | **0.974** | > 0.6 | n/a (no codebook) |
-| VQ-VAE | **0.809** | > 0.6 | ~370 / 512 codes in active use |
-
-> TODO (once the exact console numbers are on hand): add test PSNR (dB)
-> for both models alongside SSIM here.
+| Model | Test SSIM | Test PSNR (dB) | Target | Codebook perplexity (test set) |
+|---|---|---|---|---|
+| Autoencoder (baseline) | **0.9738** | **36.38** | > 0.6 | n/a (no codebook) |
+| VQ-VAE | **0.8090** | **27.60** | > 0.6 | ~360 / 512 codes in active use |
 
 Both models clear the 0.6 feasibility target by a wide margin. The
 autoencoder's continuous bottleneck reconstructs almost perfectly;
