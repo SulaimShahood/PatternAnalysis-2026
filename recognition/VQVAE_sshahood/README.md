@@ -197,16 +197,18 @@ Trained and evaluated on Rangpur (UQ's HPC cluster) inside a conda
 environment named `torch`, Python 3.11, with a single A100 GPU
 (`--gres=gpu:1`, partition `comp3710`).
 
-| Package | Role |
-|---|---|
-| `torch` | model, training loop, autograd |
-| `torchvision` | not used by the final pipeline (an earlier resize-based fix to `dataset.py` was replaced with a crop/pad approach that doesn't need it -- see `TRAINING_LOG.md`, 2026-10-17) |
-| `nibabel` | loading `.nii`/`.nii.gz` MRI slice files |
-| `numpy` | array handling outside `modules.py` (explicitly disallowed inside it per the assignment spec) |
-| `scikit-image` | `structural_similarity` for the SSIM metric (`utils.py`) |
-| `matplotlib` | all training curves and figures (`Agg` backend -- no display on compute nodes) |
+| Package | Version | Role |
+|---|---|---|
+| `torch` | 2.14.0 | model, training loop, autograd |
+| `torchvision` | 0.29.0 | not used by the final pipeline (an earlier resize-based fix to `dataset.py` was replaced with a crop/pad approach that doesn't need it -- see `TRAINING_LOG.md`, 2026-10-17) |
+| `nibabel` | 5.4.2 | loading `.nii`/`.nii.gz` MRI slice files |
+| `numpy` | 2.4.6 | array handling outside `modules.py` (explicitly disallowed inside it per the assignment spec) |
+| `scikit-image` | 0.26.0 | `structural_similarity` for the SSIM metric (`utils.py`) |
+| `matplotlib` | 3.11.2 | all training curves and figures (`Agg` backend -- no display on compute nodes) |
+| `scipy` | 1.17.1 | dependency of `scikit-image` |
+| `pillow` | 12.3.0 | dependency of `torchvision`/`matplotlib` image handling |
 
-> TODO: pin exact versions here (`pip freeze | grep -iE "torch|nibabel|scikit-image|numpy|matplotlib"` from the Rangpur `torch` environment) once collected.
+Versions pinned from `pip freeze` inside the Rangpur `torch` conda environment.
 
 **Reproducibility:** `train.py` sets `torch.manual_seed(args.seed)`
 (default 42) before building the model or loaders. Note this does not
