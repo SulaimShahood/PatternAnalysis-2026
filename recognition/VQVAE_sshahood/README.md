@@ -284,8 +284,8 @@ Key `train.py` flags (all have sensible defaults -- see
 `--batch-size`, `--dead-code-threshold` (VQ-VAE dead-code revival
 sensitivity, default 1.0), `--verify-split` (run the patient-leakage
 check before training starts). Every run writes
-`outputs/<model>_metrics.csv` (per-epoch loss/SSIM/perplexity/
-codes-revived), `outputs/<model>_best.pt` (best-validation-SSIM
+`outputs/<model>_metrics.csv` (per-epoch loss, SSIM, perplexity and
+codes-revived counts), `outputs/<model>_best.pt` (best-validation-SSIM
 checkpoint), and `figures/<model>_*.png` (training curves).
 
 ## Results
